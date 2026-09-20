@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-VERSION="0.2.5"
+VERSION="0.2.6"
 APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
 CONFIG="$APP_DIR/config.conf"
 LOG="$APP_DIR/tv-cleaner.log"
@@ -220,6 +220,24 @@ guided(){
  pause
 }
 
+clean_trickplay(){
+ [ -d "$SOURCE" ] || { echo "Source not found: $SOURCE"; pause; return; }
+ local count
+ count=$(find "$SOURCE" -depth \( -type d -o -type f \) -iname '*.trickplay' 2>/dev/null | wc -l)
+ echo
+ echo ".trickplay items found: $count"
+ ((count==0)) && { echo "Nothing to clean."; pause; return; }
+ echo "This permanently removes only files/folders whose names end in .trickplay."
+ read -rp "Remove all .trickplay items from the TV source? [y/N] " a
+ [[ "${a,,}" = y ]] || { echo "Cancelled."; pause; return; }
+ find "$SOURCE" -depth -type f -iname '*.trickplay' -print -delete 2>/dev/null | while IFS= read -r p; do log "DELETE_TRICKPLAY $p"; done
+ find "$SOURCE" -depth -type d -iname '*.trickplay' -print -exec rm -rf -- {} + 2>/dev/null | while IFS= read -r p; do log "DELETE_TRICKPLAY $p"; done
+ echo ".trickplay cleanup complete."
+ # Clean parents made empty by removing trickplay data.
+ while find "$SOURCE" -depth -mindepth 1 -type d -empty -print -exec rmdir -- {} \; 2>/dev/null | grep -q .; do :; done
+ pause
+}
+
 clean_empty_folders(){
  [ -d "$SOURCE" ] || { echo "Source not found: $SOURCE"; pause; return; }
  local before after removed
@@ -261,10 +279,11 @@ Destination: $DESTINATION
 [4] View operation log
 [5] View latest scan report
 [6] Clean empty source folders
+[7] Remove .trickplay files/folders
 [Q] Quit
 EOF
  read -rp "Select: " c
- case "${c,,}" in 1) guided;;2) scan_all;;3) settings;;4) less "$LOG" 2>/dev/null || pause;;5) less "$LATEST_REPORT" 2>/dev/null || { echo "No scan report yet."; pause; };;6) clean_empty_folders;;q) exit 0;;esac
+ case "${c,,}" in 1) guided;;2) scan_all;;3) settings;;4) less "$LOG" 2>/dev/null || pause;;5) less "$LATEST_REPORT" 2>/dev/null || { echo "No scan report yet."; pause; };;6) clean_empty_folders;;7) clean_trickplay;;q) exit 0;;esac
  done
 }
 menu
