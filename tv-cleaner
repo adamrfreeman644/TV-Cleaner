@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-VERSION="0.2.2"
+VERSION="0.2.3"
 APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
 CONFIG="$APP_DIR/config.conf"
 LOG="$APP_DIR/tv-cleaner.log"
@@ -67,6 +67,7 @@ median(){
 }
 classify_season(){
  local -a fs=("$@") ds=() core=(); local f d med low high
+ (("${#fs[@]}"==0)) && return 0
  for f in "${fs[@]}"; do d=$(dur "$f"); ds+=("${d:-0}"); done
  # Find the dominant long-form cluster without assuming a minimum episode length.
  # Start from the median, then refine using files within ±20%.
@@ -163,6 +164,13 @@ guided_show(){
      while IFS='|' read -r tag pa idxs; do [ "$tag" = PLAYALL ] && playalls+=("$pa"); done < <(analyse_disc "$discpath" "${files[@]}")
      for file in "${files[@]}"; do [[ " ${playalls[*]} " == *" $file "* ]] || allfiles+=("$file"); done
    done
+
+   # A previously processed season can leave empty source folders behind.
+   # Never manufacture a zero-length episode from an empty season.
+   if (("${#allfiles[@]}"==0 && "${#playalls[@]}"==0)); then
+     echo; printf 'Season %02d: no remaining video files - skipped.\n' "$sn"
+     continue
+   fi
 
    # Learn this season's normal runtime rather than using a fixed cutoff.
    while IFS='|' read -r tag file d; do
