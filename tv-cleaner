@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 set -uo pipefail
-VERSION="0.1.3"
+VERSION="0.2.0"
 APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
 CONFIG="$APP_DIR/config.conf"
 LOG="$APP_DIR/tv-cleaner.log"
+REPORT_DIR="$APP_DIR/reports"
+LATEST_REPORT="$REPORT_DIR/latest-scan.txt"
 DEFAULT_SOURCE="/mnt/user/Media/UNFINISHED - NEEDS SORTING/TV"
 DEFAULT_DEST="/mnt/user/Media/2 ~ TV"
 DEFAULT_QUAR="/mnt/user/Media/UNFINISHED - NEEDS SORTING/TV Duplicates"
 VIDEO_RE='.*\.(mkv|mp4|avi|m4v|mov|wmv|webm)$'
-mkdir -p "$APP_DIR"
+mkdir -p "$APP_DIR" "$REPORT_DIR"
 [ -f "$CONFIG" ] || cat >"$CONFIG" <<EOF
 SOURCE="$DEFAULT_SOURCE"
 DESTINATION="$DEFAULT_DEST"
@@ -56,7 +58,33 @@ probe(){
 dur(){ probe -v error -show_entries format=duration -of default=nw=1:nk=1 "$1" 2>/dev/null | awk '{printf "%.0f",$1}'; }
 clock(){ local s=${1:-0}; printf '%02d:%02d:%02d' $((s/3600)) $(((s%3600)/60)) $((s%60)); }
 log(){ printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
-videos(){ find "$1" -type f -regextype posix-extended -iregex "$VIDEO_RE" -print0 2>/dev/null; }
+videos(){ find "$1" -type f -regextype posix-extended -iregex "$VIDEO_RE" -print0 2>/dev/null | sort -zV; }
+median(){
+ local -a a=("$@"); (("${#a[@]}"==0)) && { echo 0; return; }
+ mapfile -t a < <(printf '%s\n' "${a[@]}" | sort -n)
+ local n=${#a[@]} m=$(( ${#a[@]} / 2 ))
+ if ((n%2)); then echo "${a[m]}"; else echo $(( (a[m-1]+a[m])/2 )); fi
+}
+classify_season(){
+ local -a fs=("$@") ds=() core=(); local f d med low high
+ for f in "${fs[@]}"; do d=$(dur "$f"); ds+=("${d:-0}"); done
+ # Find the dominant long-form cluster without assuming a minimum episode length.
+ # Start from the median, then refine using files within ±20%.
+ med=$(median "${ds[@]}")
+ ((med<=0)) && { printf 'EPISODE|%s\n' "${fs[@]}"; return; }
+ low=$((med*80/100)); high=$((med*120/100))
+ for d in "${ds[@]}"; do ((d>=low && d<=high && d>0)) && core+=("$d"); done
+ (("${#core[@]}">=2)) && med=$(median "${core[@]}")
+ low=$((med*75/100)); high=$((med*125/100))
+ for ((i=0;i<${#fs[@]};i++)); do
+   d=${ds[i]}
+   if ((d>0 && d>=low && d<=high)); then
+     printf 'EPISODE|%s|%s\n' "${fs[i]}" "$d"
+   else
+     printf 'REVIEW|%s|%s\n' "${fs[i]}" "$d"
+   fi
+ done
+}
 season_num(){ local p="$1"; [[ "$p" =~ [Ss]eason[[:space:]_.-]*([0-9]+) ]] && echo $((10#${BASH_REMATCH[1]})) || echo 0; }
 disc_num(){ local p="$1"; [[ "$p" =~ [Dd]is[ck][[:space:]_.-]*([0-9]+) ]] && echo $((10#${BASH_REMATCH[1]})) || echo 0; }
 
@@ -76,7 +104,14 @@ scan_all(){
  ensure_ffprobe || { echo "Cannot continue without ffprobe."; pause; return; }
  [ -d "$SOURCE" ] || { echo "Source not found: $SOURCE"; pause; return; }
  local s
- for s in "$SOURCE"/*/; do [ -d "$s" ] && scan_show "${s%/}"; done
+ mkdir -p "$REPORT_DIR"
+ {
+   echo "TV Cleaner v$VERSION scan - $(date)"
+   echo "Source: $SOURCE"
+   for s in "$SOURCE"/*/; do [ -d "$s" ] && scan_show "${s%/}"; done
+ } | tee "$LATEST_REPORT"
+ echo
+ echo "Saved report: $LATEST_REPORT"
  pause
 }
 
@@ -100,34 +135,45 @@ analyse_disc(){
 }
 
 guided_show(){
- local show="$1" showname seasonpath sn discpath dn file d
- local -a eps=() playalls=() files=()
+ local show="$1" showname seasonpath sn discpath file d tag idxs pa ans target
+ local -a allfiles=() eps=() review=() playalls=() files=() seasons=() discs=()
  showname=$(basename "$show")
  echo; echo "=================================================="; echo "$showname"; echo "=================================================="
  mapfile -t seasons < <(find "$show" -mindepth 1 -maxdepth 1 -type d -iname 'Season*' -print | sort -V)
  if (("${#seasons[@]}"==0)); then echo "No Season folders found - skipped."; return; fi
  for seasonpath in "${seasons[@]}"; do
    sn=$(season_num "$(basename "$seasonpath")"); ((sn==0)) && { echo "Cannot identify season: $seasonpath"; continue; }
-   eps=(); playalls=()
+   allfiles=(); eps=(); review=(); playalls=()
    mapfile -t discs < <(find "$seasonpath" -mindepth 1 -maxdepth 1 -type d \( -iname 'Disc*' -o -iname 'Disk*' \) -print | sort -V)
    (("${#discs[@]}"==0)) && discs=("$seasonpath")
+
+   # Detect Play-All per disc first; preserve natural disc/title ordering.
    for discpath in "${discs[@]}"; do
      files=()
      while IFS= read -r -d '' file; do [[ "$(basename "$file")" == ._* ]] || files+=("$file"); done < <(videos "$discpath")
-     local detected="" pa=""
-     detected=$(analyse_disc "$discpath" "${files[@]}")
-     while IFS='|' read -r tag pa idxs; do [ "$tag" = PLAYALL ] && playalls+=("$pa"); done <<<"$detected"
-     for file in "${files[@]}"; do
-       [[ " ${playalls[*]} " == *" $file "* ]] && continue
-       d=$(dur "$file"); d=${d:-0}
-       eps+=("$file")
-     done
+     while IFS='|' read -r tag pa idxs; do [ "$tag" = PLAYALL ] && playalls+=("$pa"); done < <(analyse_disc "$discpath" "${files[@]}")
+     for file in "${files[@]}"; do [[ " ${playalls[*]} " == *" $file "* ]] || allfiles+=("$file"); done
    done
-   echo; printf 'Season %02d: %d episode candidates, %d Play-All\n' "$sn" "${#eps[@]}" "${#playalls[@]}"
-   local e=1 target
+
+   # Learn this season's normal runtime rather than using a fixed cutoff.
+   while IFS='|' read -r tag file d; do
+     [ "$tag" = EPISODE ] && eps+=("$file") || review+=("$file")
+   done < <(classify_season "${allfiles[@]}")
+
+   echo; printf 'Season %02d: %d strong episode candidates, %d NEED REVIEW, %d Play-All\n' "$sn" "${#eps[@]}" "${#review[@]}" "${#playalls[@]}"
+   local e=1
    for file in "${eps[@]}"; do printf '  E%02d  %s  <- %s\n' "$e" "$(clock "$(dur "$file")")" "${file#$show/}"; ((e+=1)); done
+   if (("${#review[@]}")); then
+     echo "  --- REVIEW: these will NOT be moved automatically ---"
+     for file in "${review[@]}"; do printf '  ?    %s  <- %s\n' "$(clock "$(dur "$file")")" "${file#$show/}"; done
+   fi
    for file in "${playalls[@]}"; do echo "  PLAY-ALL -> quarantine: ${file#$show/}"; done
    echo
+   if (("${#review[@]}")); then
+     echo "Safety lock: unresolved files exist. Apply is disabled for this season."
+     read -rp "[S] Skip season  [Q] Quit guided cleanup: " ans
+     case "${ans,,}" in q) return 2;; *) continue;; esac
+   fi
    read -rp "[A] Apply this season  [S] Skip  [Q] Quit guided cleanup: " ans
    case "${ans,,}" in q) return 2;; a)
      mkdir -p "$DESTINATION/$showname/Season $(printf '%02d' "$sn")"
@@ -181,11 +227,12 @@ Destination: $DESTINATION
 [2] Scan source (read-only)
 [3] Settings
 [4] View operation log
-[5] Update TV Cleaner
+[5] View latest scan report
+[6] Update TV Cleaner
 [Q] Quit
 EOF
  read -rp "Select: " c
- case "${c,,}" in 1) guided;;2) scan_all;;3) settings;;4) less "$LOG" 2>/dev/null || pause;;5) update_app;;q) exit 0;;esac
+ case "${c,,}" in 1) guided;;2) scan_all;;3) settings;;4) less "$LOG" 2>/dev/null || pause;;5) less "$LATEST_REPORT" 2>/dev/null || { echo "No scan report yet."; pause; };;6) update_app;;q) exit 0;;esac
  done
 }
 menu
