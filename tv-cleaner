@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-VERSION="0.2.1"
+VERSION="0.2.2"
 APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
 CONFIG="$APP_DIR/config.conf"
 LOG="$APP_DIR/tv-cleaner.log"
@@ -85,7 +85,16 @@ classify_season(){
    fi
  done
 }
-season_num(){ local p="$1"; [[ "$p" =~ [Ss]eason[[:space:]_.-]*([0-9]+) ]] && echo $((10#${BASH_REMATCH[1]})) || echo 0; }
+season_num(){
+ local p="$1"
+ if [[ "$p" =~ ^[Ss]eason[[:space:]_.-]*([0-9]+)$ ]]; then
+   echo $((10#${BASH_REMATCH[1]}))
+ elif [[ "$p" =~ ^[Ss]([0-9]+)$ ]]; then
+   echo $((10#${BASH_REMATCH[1]}))
+ else
+   echo 0
+ fi
+}
 disc_num(){ local p="$1"; [[ "$p" =~ [Dd]is[ck][[:space:]_.-]*([0-9]+) ]] && echo $((10#${BASH_REMATCH[1]})) || echo 0; }
 
 scan_show(){
@@ -139,8 +148,8 @@ guided_show(){
  local -a allfiles=() eps=() review=() playalls=() files=() seasons=() discs=()
  showname=$(basename "$show")
  echo; echo "=================================================="; echo "$showname"; echo "=================================================="
- mapfile -t seasons < <(find "$show" -mindepth 1 -maxdepth 1 -type d -iname 'Season*' -print | sort -V)
- if (("${#seasons[@]}"==0)); then echo "No Season folders found - skipped."; return; fi
+ mapfile -t seasons < <(find "$show" -mindepth 1 -maxdepth 1 -type d \( -iname 'Season*' -o -iname 'S[0-9]*' \) -print | sort -V)
+ if (("${#seasons[@]}"==0)); then echo "No Season/S## folders found - skipped."; return; fi
  for seasonpath in "${seasons[@]}"; do
    sn=$(season_num "$(basename "$seasonpath")"); ((sn==0)) && { echo "Cannot identify season: $seasonpath"; continue; }
    allfiles=(); eps=(); review=(); playalls=()
