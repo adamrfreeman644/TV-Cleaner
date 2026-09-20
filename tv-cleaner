@@ -26,10 +26,11 @@ pause(){ read -rp "Press Enter to continue... " _; }
 choice(){
  local prompt="$1" valid="$2" c
  while true; do
-   read -rsn1 -p "$prompt" c
-   echo
+   printf '%s' "$prompt" >&2
+   IFS= read -r c
    c="${c,,}"
-   [[ "$valid" == *"$c"* ]] && { printf '%s' "$c"; return 0; }
+   [[ "${#c}" -eq 1 && "$valid" == *"$c"* ]] && { printf '%s' "$c"; return 0; }
+   echo "Please enter one of: $valid" >&2
  done
 }
 ensure_ffprobe(){
