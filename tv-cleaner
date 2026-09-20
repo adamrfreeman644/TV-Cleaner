@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-VERSION="0.1.1"
+VERSION="0.1.2"
 APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
 CONFIG="$APP_DIR/config.conf"
 LOG="$APP_DIR/tv-cleaner.log"
@@ -13,7 +13,6 @@ mkdir -p "$APP_DIR"
 SOURCE="$DEFAULT_SOURCE"
 DESTINATION="$DEFAULT_DEST"
 QUARANTINE="$DEFAULT_QUAR"
-MIN_EPISODE_MINUTES=18
 PLAYALL_TOLERANCE_SECONDS=20
 EOF
 # shellcheck disable=SC1090
@@ -51,15 +50,15 @@ season_num(){ local p="$1"; [[ "$p" =~ [Ss]eason[[:space:]_.-]*([0-9]+) ]] && ec
 disc_num(){ local p="$1"; [[ "$p" =~ [Dd]is[ck][[:space:]_.-]*([0-9]+) ]] && echo $((10#${BASH_REMATCH[1]})) || echo 0; }
 
 scan_show(){
- local show="$1" file d n=0 short=0
+ local show="$1" file d n=0
  echo; echo "=== $(basename "$show") ==="
  while IFS= read -r -d '' file; do
    [[ "$(basename "$file")" == ._* ]] && continue
    d=$(dur "$file"); [ -z "$d" ] && d=0
-   ((n+=1)); (( d < MIN_EPISODE_MINUTES*60 )) && ((short+=1))
+   ((n+=1))
    printf '  %s  %s\n' "$(clock "$d")" "${file#$show/}"
  done < <(videos "$show")
- echo "  Videos: $n | short/extra candidates: $short"
+ echo "  Videos: $n"
 }
 
 scan_all(){
@@ -75,11 +74,10 @@ analyse_disc(){
  local -a fs=("$@") ds=() candidates=(); local f d i j sum diff
  for f in "${fs[@]}"; do d=$(dur "$f"); ds+=("${d:-0}"); done
  for ((i=0;i<${#fs[@]};i++)); do
-   (( ds[i] < MIN_EPISODE_MINUTES*60 )) && continue
    sum=0; candidates=()
    for ((j=0;j<${#fs[@]};j++)); do
      ((i==j)) && continue
-     if (( ds[j] >= MIN_EPISODE_MINUTES*60 && ds[j] < ds[i] )); then sum=$((sum+ds[j])); candidates+=("$j"); fi
+     if (( ds[j] > 0 && ds[j] < ds[i] )); then sum=$((sum+ds[j])); candidates+=("$j"); fi
    done
    diff=$((ds[i]-sum)); ((diff<0)) && diff=$((-diff))
    if (( ${#candidates[@]} >= 2 && diff <= PLAYALL_TOLERANCE_SECONDS )); then
@@ -92,14 +90,14 @@ analyse_disc(){
 
 guided_show(){
  local show="$1" showname seasonpath sn discpath dn file d
- local -a eps=() playalls=() shorts=() files=()
+ local -a eps=() playalls=() files=()
  showname=$(basename "$show")
  echo; echo "=================================================="; echo "$showname"; echo "=================================================="
  mapfile -t seasons < <(find "$show" -mindepth 1 -maxdepth 1 -type d -iname 'Season*' -print | sort -V)
  if (("${#seasons[@]}"==0)); then echo "No Season folders found - skipped."; return; fi
  for seasonpath in "${seasons[@]}"; do
    sn=$(season_num "$(basename "$seasonpath")"); ((sn==0)) && { echo "Cannot identify season: $seasonpath"; continue; }
-   eps=(); playalls=(); shorts=()
+   eps=(); playalls=()
    mapfile -t discs < <(find "$seasonpath" -mindepth 1 -maxdepth 1 -type d \( -iname 'Disc*' -o -iname 'Disk*' \) -print | sort -V)
    (("${#discs[@]}"==0)) && discs=("$seasonpath")
    for discpath in "${discs[@]}"; do
@@ -111,14 +109,13 @@ guided_show(){
      for file in "${files[@]}"; do
        [[ " ${playalls[*]} " == *" $file "* ]] && continue
        d=$(dur "$file"); d=${d:-0}
-       if ((d < MIN_EPISODE_MINUTES*60)); then shorts+=("$file"); else eps+=("$file"); fi
+       eps+=("$file")
      done
    done
-   echo; printf 'Season %02d: %d episode candidates, %d Play-All, %d short extras\n' "$sn" "${#eps[@]}" "${#playalls[@]}" "${#shorts[@]}"
+   echo; printf 'Season %02d: %d episode candidates, %d Play-All\n' "$sn" "${#eps[@]}" "${#playalls[@]}"
    local e=1 target
    for file in "${eps[@]}"; do printf '  E%02d  %s  <- %s\n' "$e" "$(clock "$(dur "$file")")" "${file#$show/}"; ((e+=1)); done
    for file in "${playalls[@]}"; do echo "  PLAY-ALL -> quarantine: ${file#$show/}"; done
-   for file in "${shorts[@]}"; do echo "  EXTRA -> quarantine: ${file#$show/}"; done
    echo
    read -rp "[A] Apply this season  [S] Skip  [Q] Quit guided cleanup: " ans
    case "${ans,,}" in q) return 2;; a)
@@ -131,9 +128,6 @@ guided_show(){
      done
      for file in "${playalls[@]}"; do
        target="$QUARANTINE/$showname/Season $(printf '%02d' "$sn")/PLAY-ALL - $(basename "$file")"; mkdir -p "$(dirname "$target")"; mv -n -- "$file" "$target" && log "QUARANTINE $file -> $target"
-     done
-     for file in "${shorts[@]}"; do
-       target="$QUARANTINE/$showname/Season $(printf '%02d' "$sn")/Extras/$(basename "$file")"; mkdir -p "$(dirname "$target")"; mv -n -- "$file" "$target" && log "EXTRA $file -> $target"
      done
      echo "Applied Season $(printf '%02d' "$sn").";;
    esac
@@ -148,7 +142,7 @@ guided(){
 }
 
 settings(){
- echo "Config: $CONFIG"; echo "SOURCE=$SOURCE"; echo "DESTINATION=$DESTINATION"; echo "QUARANTINE=$QUARANTINE"; echo "MIN_EPISODE_MINUTES=$MIN_EPISODE_MINUTES"; echo "PLAYALL_TOLERANCE_SECONDS=$PLAYALL_TOLERANCE_SECONDS"; echo; echo "Edit with: nano \"$CONFIG\""; pause
+ echo "Config: $CONFIG"; echo "SOURCE=$SOURCE"; echo "DESTINATION=$DESTINATION"; echo "QUARANTINE=$QUARANTINE"; echo "PLAYALL_TOLERANCE_SECONDS=$PLAYALL_TOLERANCE_SECONDS"; echo; echo "Edit with: nano \"$CONFIG\""; pause
 }
 update_app(){
  if [ ! -d "$APP_DIR/.git" ]; then echo "This install is not a Git clone. Re-run install.sh from the repository."; pause; return; fi
