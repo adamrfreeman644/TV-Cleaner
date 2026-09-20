@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-VERSION="0.2.6"
+VERSION="0.2.7"
 APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
 CONFIG="$APP_DIR/config.conf"
 LOG="$APP_DIR/tv-cleaner.log"
@@ -220,42 +220,30 @@ guided(){
  pause
 }
 
-clean_trickplay(){
+clean_source(){
  [ -d "$SOURCE" ] || { echo "Source not found: $SOURCE"; pause; return; }
- local count
- count=$(find "$SOURCE" -depth \( -type d -o -type f \) -iname '*.trickplay' 2>/dev/null | wc -l)
+ local empty_count trick_count
+ empty_count=$(find "$SOURCE" -type d -empty 2>/dev/null | wc -l)
+ trick_count=$(find "$SOURCE" -depth \( -type d -o -type f \) -iname '*.trickplay' 2>/dev/null | wc -l)
  echo
- echo ".trickplay items found: $count"
- ((count==0)) && { echo "Nothing to clean."; pause; return; }
- echo "This permanently removes only files/folders whose names end in .trickplay."
- read -rp "Remove all .trickplay items from the TV source? [y/N] " a
+ echo "Source cleanup"
+ echo "  Empty folders:     $empty_count"
+ echo "  .trickplay items:  $trick_count"
+ ((empty_count==0 && trick_count==0)) && { echo "Nothing to clean."; pause; return; }
+ echo
+ echo "This removes .trickplay data and completely empty source folders."
+ echo "No video files are removed."
+ read -rp "Clean the TV source now? [y/N] " a
  [[ "${a,,}" = y ]] || { echo "Cancelled."; pause; return; }
+
  find "$SOURCE" -depth -type f -iname '*.trickplay' -print -delete 2>/dev/null | while IFS= read -r p; do log "DELETE_TRICKPLAY $p"; done
  find "$SOURCE" -depth -type d -iname '*.trickplay' -print -exec rm -rf -- {} + 2>/dev/null | while IFS= read -r p; do log "DELETE_TRICKPLAY $p"; done
- echo ".trickplay cleanup complete."
- # Clean parents made empty by removing trickplay data.
- while find "$SOURCE" -depth -mindepth 1 -type d -empty -print -exec rmdir -- {} \; 2>/dev/null | grep -q .; do :; done
- pause
-}
 
-clean_empty_folders(){
- [ -d "$SOURCE" ] || { echo "Source not found: $SOURCE"; pause; return; }
- local before after removed
- before=$(find "$SOURCE" -type d -empty 2>/dev/null | wc -l)
- echo
- echo "Empty folders currently found: $before"
- ((before==0)) && { echo "Nothing to clean."; pause; return; }
- echo "Only completely empty directories will be removed."
- read -rp "Remove them now? [y/N] " a
- [[ "${a,,}" = y ]] || { echo "Cancelled."; pause; return; }
- # Repeated bottom-up passes also remove parents that become empty.
+ # Repeated bottom-up passes remove empty parents exposed by the cleanup.
  while find "$SOURCE" -depth -mindepth 1 -type d -empty -print -exec rmdir -- {} \; 2>/dev/null | grep -q .; do :; done
- after=$(find "$SOURCE" -type d -empty 2>/dev/null | wc -l)
- removed=$((before-after))
- echo "Empty-folder cleanup complete."
- echo "Initial empty folders: $before"
- echo "Remaining empty folders: $after"
- log "EMPTY_FOLDER_CLEANUP initial=$before remaining=$after"
+
+ echo "Source cleanup complete."
+ log "SOURCE_CLEANUP empty_before=$empty_count trickplay_before=$trick_count"
  pause
 }
 
@@ -278,12 +266,11 @@ Destination: $DESTINATION
 [3] Settings
 [4] View operation log
 [5] View latest scan report
-[6] Clean empty source folders
-[7] Remove .trickplay files/folders
+[6] Clean source (.trickplay + empty folders)
 [Q] Quit
 EOF
  read -rp "Select: " c
- case "${c,,}" in 1) guided;;2) scan_all;;3) settings;;4) less "$LOG" 2>/dev/null || pause;;5) less "$LATEST_REPORT" 2>/dev/null || { echo "No scan report yet."; pause; };;6) clean_empty_folders;;7) clean_trickplay;;q) exit 0;;esac
+ case "${c,,}" in 1) guided;;2) scan_all;;3) settings;;4) less "$LOG" 2>/dev/null || pause;;5) less "$LATEST_REPORT" 2>/dev/null || { echo "No scan report yet."; pause; };;6) clean_source;;q) exit 0;;esac
  done
 }
 menu
