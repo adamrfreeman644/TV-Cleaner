@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+set -uo pipefail
+VERSION="0.1.0"
+APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
+CONFIG="$APP_DIR/config.conf"
+LOG="$APP_DIR/tv-cleaner.log"
+DEFAULT_SOURCE="/mnt/user/Media/UNFINISHED - NEEDS SORTING/TV"
+DEFAULT_DEST="/mnt/user/Media/2 ~ TV"
+DEFAULT_QUAR="/mnt/user/Media/UNFINISHED - NEEDS SORTING/TV Duplicates"
+VIDEO_RE='.*\.(mkv|mp4|avi|m4v|mov|wmv|webm)$'
+mkdir -p "$APP_DIR"
+[ -f "$CONFIG" ] || cat >"$CONFIG" <<EOF
+SOURCE="$DEFAULT_SOURCE"
+DESTINATION="$DEFAULT_DEST"
+QUARANTINE="$DEFAULT_QUAR"
+MIN_EPISODE_MINUTES=18
+PLAYALL_TOLERANCE_SECONDS=20
+EOF
+# shellcheck disable=SC1090
+source "$CONFIG"
+
+pause(){ read -rp "Press Enter to continue... " _; }
+dur(){ ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$1" 2>/dev/null | awk '{printf "%.0f",$1}'; }
+clock(){ local s=${1:-0}; printf '%02d:%02d:%02d' $((s/3600)) $(((s%3600)/60)) $((s%60)); }
+log(){ printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
+videos(){ find "$1" -type f -regextype posix-extended -iregex "$VIDEO_RE" -print0 2>/dev/null; }
+season_num(){ local p="$1"; [[ "$p" =~ [Ss]eason[[:space:]_.-]*([0-9]+) ]] && echo $((10#${BASH_REMATCH[1]})) || echo 0; }
+disc_num(){ local p="$1"; [[ "$p" =~ [Dd]is[ck][[:space:]_.-]*([0-9]+) ]] && echo $((10#${BASH_REMATCH[1]})) || echo 0; }
+
+scan_show(){
+ local show="$1" file d n=0 short=0
+ echo; echo "=== $(basename "$show") ==="
+ while IFS= read -r -d '' file; do
+   [[ "$(basename "$file")" == ._* ]] && continue
+   d=$(dur "$file"); [ -z "$d" ] && d=0
+   ((n+=1)); (( d < MIN_EPISODE_MINUTES*60 )) && ((short+=1))
+   printf '  %s  %s\n' "$(clock "$d")" "${file#$show/}"
+ done < <(videos "$show")
+ echo "  Videos: $n | short/extra candidates: $short"
+}
+
+scan_all(){
+ command -v ffprobe >/dev/null || { echo "ERROR: ffprobe is required."; pause; return; }
+ [ -d "$SOURCE" ] || { echo "Source not found: $SOURCE"; pause; return; }
+ local s
+ for s in "$SOURCE"/*/; do [ -d "$s" ] && scan_show "${s%/}"; done
+ pause
+}
+
+analyse_disc(){
+ local dir="$1"; shift
+ local -a fs=("$@") ds=() candidates=(); local f d i j sum diff
+ for f in "${fs[@]}"; do d=$(dur "$f"); ds+=("${d:-0}"); done
+ for ((i=0;i<${#fs[@]};i++)); do
+   (( ds[i] < MIN_EPISODE_MINUTES*60 )) && continue
+   sum=0; candidates=()
+   for ((j=0;j<${#fs[@]};j++)); do
+     ((i==j)) && continue
+     if (( ds[j] >= MIN_EPISODE_MINUTES*60 && ds[j] < ds[i] )); then sum=$((sum+ds[j])); candidates+=("$j"); fi
+   done
+   diff=$((ds[i]-sum)); ((diff<0)) && diff=$((-diff))
+   if (( ${#candidates[@]} >= 2 && diff <= PLAYALL_TOLERANCE_SECONDS )); then
+     printf 'PLAYALL|%s|' "${fs[i]}"
+     printf '%s,' "${candidates[@]}"
+     printf '\n'
+   fi
+ done
+}
+
+guided_show(){
+ local show="$1" showname seasonpath sn discpath dn file d
+ local -a eps=() playalls=() shorts=() files=()
+ showname=$(basename "$show")
+ echo; echo "=================================================="; echo "$showname"; echo "=================================================="
+ mapfile -t seasons < <(find "$show" -mindepth 1 -maxdepth 1 -type d -iname 'Season*' -print | sort -V)
+ if (("${#seasons[@]}"==0)); then echo "No Season folders found - skipped."; return; fi
+ for seasonpath in "${seasons[@]}"; do
+   sn=$(season_num "$(basename "$seasonpath")"); ((sn==0)) && { echo "Cannot identify season: $seasonpath"; continue; }
+   eps=(); playalls=(); shorts=()
+   mapfile -t discs < <(find "$seasonpath" -mindepth 1 -maxdepth 1 -type d \( -iname 'Disc*' -o -iname 'Disk*' \) -print | sort -V)
+   (("${#discs[@]}"==0)) && discs=("$seasonpath")
+   for discpath in "${discs[@]}"; do
+     files=()
+     while IFS= read -r -d '' file; do [[ "$(basename "$file")" == ._* ]] || files+=("$file"); done < <(videos "$discpath")
+     local detected="" pa=""
+     detected=$(analyse_disc "$discpath" "${files[@]}")
+     while IFS='|' read -r tag pa idxs; do [ "$tag" = PLAYALL ] && playalls+=("$pa"); done <<<"$detected"
+     for file in "${files[@]}"; do
+       [[ " ${playalls[*]} " == *" $file "* ]] && continue
+       d=$(dur "$file"); d=${d:-0}
+       if ((d < MIN_EPISODE_MINUTES*60)); then shorts+=("$file"); else eps+=("$file"); fi
+     done
+   done
+   echo; printf 'Season %02d: %d episode candidates, %d Play-All, %d short extras\n' "$sn" "${#eps[@]}" "${#playalls[@]}" "${#shorts[@]}"
+   local e=1 target
+   for file in "${eps[@]}"; do printf '  E%02d  %s  <- %s\n' "$e" "$(clock "$(dur "$file")")" "${file#$show/}"; ((e+=1)); done
+   for file in "${playalls[@]}"; do echo "  PLAY-ALL -> quarantine: ${file#$show/}"; done
+   for file in "${shorts[@]}"; do echo "  EXTRA -> quarantine: ${file#$show/}"; done
+   echo
+   read -rp "[A] Apply this season  [S] Skip  [Q] Quit guided cleanup: " ans
+   case "${ans,,}" in q) return 2;; a)
+     mkdir -p "$DESTINATION/$showname/Season $(printf '%02d' "$sn")"
+     e=1
+     for file in "${eps[@]}"; do
+       target="$DESTINATION/$showname/Season $(printf '%02d' "$sn")/$showname S$(printf '%02d' "$sn")E$(printf '%02d' "$e").${file##*.}"
+       if [ -e "$target" ]; then echo "COLLISION - skipped: $target"; log "COLLISION $target"; else mv -n -- "$file" "$target" && log "MOVE $file -> $target"; fi
+       ((e+=1))
+     done
+     for file in "${playalls[@]}"; do
+       target="$QUARANTINE/$showname/Season $(printf '%02d' "$sn")/PLAY-ALL - $(basename "$file")"; mkdir -p "$(dirname "$target")"; mv -n -- "$file" "$target" && log "QUARANTINE $file -> $target"
+     done
+     for file in "${shorts[@]}"; do
+       target="$QUARANTINE/$showname/Season $(printf '%02d' "$sn")/Extras/$(basename "$file")"; mkdir -p "$(dirname "$target")"; mv -n -- "$file" "$target" && log "EXTRA $file -> $target"
+     done
+     echo "Applied Season $(printf '%02d' "$sn").";;
+   esac
+ done
+}
+
+guided(){
+ command -v ffprobe >/dev/null || { echo "ERROR: ffprobe is required."; pause; return; }
+ local s
+ for s in "$SOURCE"/*/; do [ -d "$s" ] || continue; guided_show "${s%/}" || break; done
+ pause
+}
+
+settings(){
+ echo "Config: $CONFIG"; echo "SOURCE=$SOURCE"; echo "DESTINATION=$DESTINATION"; echo "QUARANTINE=$QUARANTINE"; echo "MIN_EPISODE_MINUTES=$MIN_EPISODE_MINUTES"; echo "PLAYALL_TOLERANCE_SECONDS=$PLAYALL_TOLERANCE_SECONDS"; echo; echo "Edit with: nano \"$CONFIG\""; pause
+}
+update_app(){
+ if [ ! -d "$APP_DIR/.git" ]; then echo "This install is not a Git clone. Re-run install.sh from the repository."; pause; return; fi
+ echo "Current version: $VERSION"; git -C "$APP_DIR" fetch --tags origin || { pause; return; }
+ local latest; latest=$(git -C "$APP_DIR" tag --sort=-v:refname | head -1)
+ [ -z "$latest" ] && { echo "No release tags found."; pause; return; }
+ echo "Latest release: $latest"; [ "v$VERSION" = "$latest" ] && { echo "Already current."; pause; return; }
+ read -rp "Update to $latest? [y/N] " a
+ [[ "${a,,}" = y ]] || return
+ git -C "$APP_DIR" checkout -f "$latest" && "$APP_DIR/install.sh" --launcher-only
+ pause
+}
+menu(){
+ while true; do
+ clear
+ cat <<EOF
+╔══════════════════════════════════════════════════╗
+║                 TV CLEANER                       ║
+║               Jellyfin Mode v$VERSION              ║
+╚══════════════════════════════════════════════════╝
+Source:      $SOURCE
+Destination: $DESTINATION
+
+[1] Guided cleanup
+[2] Scan source (read-only)
+[3] Settings
+[4] View operation log
+[5] Update TV Cleaner
+[Q] Quit
+EOF
+ read -rp "Select: " c
+ case "${c,,}" in 1) guided;;2) scan_all;;3) settings;;4) less "$LOG" 2>/dev/null || pause;;5) update_app;;q) exit 0;;esac
+ done
+}
+menu
