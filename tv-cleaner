@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-VERSION="0.3.0"
+VERSION="0.4.0"
 APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
 CONFIG="$APP_DIR/config.conf"
 LOG="$APP_DIR/tv-cleaner.log"
@@ -23,6 +23,346 @@ EOF
 source "$CONFIG"
 
 pause(){ read -rp "Press Enter to continue... " _; }
+choice(){
+ local prompt="$1" valid="$2" c
+ while true; do
+   read -rsn1 -p "$prompt" c
+   [[ "$c" == 
+ensure_ffprobe(){
+  command -v ffprobe >/dev/null 2>&1 && return 0
+  echo
+  echo "ffprobe is not installed."
+  echo "TV Cleaner uses ffprobe to read episode durations and detect Play-All titles."
+  echo
+  if command -v docker >/dev/null 2>&1; then
+    echo "Docker is available. TV Cleaner can use a lightweight FFmpeg container automatically."
+    read -rp "Enable containerised ffprobe now? [Y/n] " a
+    [[ "${a,,}" = n ]] && return 1
+    FFPROBE_MODE=docker
+    return 0
+  fi
+  echo "Neither ffprobe nor Docker is available."
+  return 1
+}
+probe(){
+  if command -v ffprobe >/dev/null 2>&1; then
+    ffprobe "$@"
+    return
+  fi
+
+  # linuxserver/ffmpeg uses ffmpeg as its image entrypoint. Override it so
+  # the requested command is actually ffprobe rather than "ffmpeg ffprobe".
+  local last="${!#}" hostdir base
+  hostdir=$(dirname "$last")
+  base=$(basename "$last")
+  local -a args=("${@:1:$#-1}")
+
+  docker run --rm --entrypoint ffprobe \
+    -v "$hostdir:/media:ro" \
+    linuxserver/ffmpeg:latest \
+    "${args[@]}" "/media/$base"
+}
+dur(){ probe -v error -show_entries format=duration -of default=nw=1:nk=1 "$1" 2>/dev/null | awk '{printf "%.0f",$1}'; }
+clock(){ local s=${1:-0}; printf '%02d:%02d:%02d' $((s/3600)) $(((s%3600)/60)) $((s%60)); }
+log(){ printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
+videos(){ find "$1" -type f -regextype posix-extended -iregex "$VIDEO_RE" -print0 2>/dev/null | sort -zV; }
+median(){
+ local -a a=("$@"); (("${#a[@]}"==0)) && { echo 0; return; }
+ mapfile -t a < <(printf '%s\n' "${a[@]}" | sort -n)
+ local n=${#a[@]} m=$(( ${#a[@]} / 2 ))
+ if ((n%2)); then echo "${a[m]}"; else echo $(( (a[m-1]+a[m])/2 )); fi
+}
+classify_season(){
+ local -a fs=("$@") ds=() core=(); local f d med low high
+ (("${#fs[@]}"==0)) && return 0
+ for f in "${fs[@]}"; do d=$(dur "$f"); ds+=("${d:-0}"); done
+ # Find the dominant long-form cluster without assuming a minimum episode length.
+ # Start from the median, then refine using files within ±20%.
+ med=$(median "${ds[@]}")
+ ((med<=0)) && { printf 'EPISODE|%s\n' "${fs[@]}"; return; }
+ low=$((med*80/100)); high=$((med*120/100))
+ for d in "${ds[@]}"; do ((d>=low && d<=high && d>0)) && core+=("$d"); done
+ (("${#core[@]}">=2)) && med=$(median "${core[@]}")
+ low=$((med*75/100)); high=$((med*125/100))
+ for ((i=0;i<${#fs[@]};i++)); do
+   d=${ds[i]}
+   if ((d>0 && d>=low && d<=high)); then
+     printf 'EPISODE|%s|%s\n' "${fs[i]}" "$d"
+   else
+     printf 'REVIEW|%s|%s\n' "${fs[i]}" "$d"
+   fi
+ done
+}
+season_num(){
+ local p="$1"
+ if [[ "$p" =~ ^[Ss]eason[[:space:]_.-]*([0-9]+)$ ]]; then
+   echo $((10#${BASH_REMATCH[1]}))
+ elif [[ "$p" =~ ^[Ss]([0-9]+)$ ]]; then
+   echo $((10#${BASH_REMATCH[1]}))
+ else
+   echo 0
+ fi
+}
+disc_num(){ local p="$1"; [[ "$p" =~ [Dd]is[ck][[:space:]_.-]*([0-9]+) ]] && echo $((10#${BASH_REMATCH[1]})) || echo 0; }
+
+scan_show(){
+ local show="$1" file d n=0
+ echo; echo "=== $(basename "$show") ==="
+ while IFS= read -r -d '' file; do
+   [[ "$(basename "$file")" == ._* ]] && continue
+   d=$(dur "$file"); [ -z "$d" ] && d=0
+   ((n+=1))
+   printf '  %s  %s\n' "$(clock "$d")" "${file#$show/}"
+ done < <(videos "$show")
+ echo "  Videos: $n"
+}
+
+scan_all(){
+ ensure_ffprobe || { echo "Cannot continue without ffprobe."; pause; return; }
+ [ -d "$SOURCE" ] || { echo "Source not found: $SOURCE"; pause; return; }
+ local s
+ mkdir -p "$REPORT_DIR"
+ {
+   echo "TV Cleaner v$VERSION scan - $(date)"
+   echo "Source: $SOURCE"
+   for s in "$SOURCE"/*/; do
+     [ -d "$s" ] || continue
+     find "$s" -type f -regextype posix-extended -iregex "$VIDEO_RE" -print -quit 2>/dev/null | grep -q . || continue
+     scan_show "${s%/}"
+   done
+ } | tee "$LATEST_REPORT"
+ echo
+ echo "Saved report: $LATEST_REPORT"
+ pause
+}
+
+analyse_disc(){
+ local dir="$1"; shift
+ local -a fs=("$@") ds=() candidates=(); local f d i j sum diff
+ for f in "${fs[@]}"; do d=$(dur "$f"); ds+=("${d:-0}"); done
+ for ((i=0;i<${#fs[@]};i++)); do
+   sum=0; candidates=()
+   for ((j=0;j<${#fs[@]};j++)); do
+     ((i==j)) && continue
+     if (( ds[j] > 0 && ds[j] < ds[i] )); then sum=$((sum+ds[j])); candidates+=("$j"); fi
+   done
+   diff=$((ds[i]-sum)); ((diff<0)) && diff=$((-diff))
+   if (( ${#candidates[@]} >= 2 && diff <= PLAYALL_TOLERANCE_SECONDS )); then
+     printf 'PLAYALL|%s|' "${fs[i]}"
+     printf '%s,' "${candidates[@]}"
+     printf '\n'
+   fi
+ done
+}
+
+guided_show(){
+ local show="$1" showname seasonpath sn discpath file d tag idxs pa ans target
+ local -a allfiles=() eps=() review=() playalls=() files=() seasons=() discs=()
+ showname=$(basename "$show")
+ echo; echo "=================================================="; echo "$showname"; echo "=================================================="
+ mapfile -t seasons < <(find "$show" -mindepth 1 -maxdepth 1 -type d \( -iname 'Season*' -o -iname 'S[0-9]*' \) -print | sort -V)
+ if (("${#seasons[@]}"==0)); then echo "No Season/S## folders found - skipped."; return; fi
+ for seasonpath in "${seasons[@]}"; do
+   sn=$(season_num "$(basename "$seasonpath")"); ((sn==0)) && { echo "Cannot identify season: $seasonpath"; continue; }
+   allfiles=(); eps=(); review=(); playalls=()
+   mapfile -t discs < <(find "$seasonpath" -mindepth 1 -maxdepth 1 -type d \( -iname 'Disc*' -o -iname 'Disk*' \) -print | sort -V)
+   (("${#discs[@]}"==0)) && discs=("$seasonpath")
+
+   # Detect Play-All per disc first; preserve natural disc/title ordering.
+   for discpath in "${discs[@]}"; do
+     files=()
+     while IFS= read -r -d '' file; do [[ "$(basename "$file")" == ._* ]] || files+=("$file"); done < <(videos "$discpath")
+     while IFS='|' read -r tag pa idxs; do [ "$tag" = PLAYALL ] && playalls+=("$pa"); done < <(analyse_disc "$discpath" "${files[@]}")
+     for file in "${files[@]}"; do [[ " ${playalls[*]} " == *" $file "* ]] || allfiles+=("$file"); done
+   done
+
+   # A previously processed season can leave empty source folders behind.
+   # Never manufacture a zero-length episode from an empty season.
+   if (("${#allfiles[@]}"==0 && "${#playalls[@]}"==0)); then
+     echo; printf 'Season %02d: no remaining video files - skipped.\n' "$sn"
+     continue
+   fi
+
+   # Learn this season's normal runtime rather than using a fixed cutoff.
+   while IFS='|' read -r tag file d; do
+     [ "$tag" = EPISODE ] && eps+=("$file") || review+=("$file")
+   done < <(classify_season "${allfiles[@]}")
+
+   echo; printf 'Season %02d: %d strong episode candidates, %d NEED REVIEW, %d Play-All\n' "$sn" "${#eps[@]}" "${#review[@]}" "${#playalls[@]}"
+   local e=1
+   for file in "${eps[@]}"; do printf '  E%02d  %s  <- %s\n' "$e" "$(clock "$(dur "$file")")" "${file#$show/}"; ((e+=1)); done
+   if (("${#review[@]}")); then
+     echo "  --- REVIEW: these will NOT be moved automatically ---"
+     for file in "${review[@]}"; do printf '  ?    %s  <- %s\n' "$(clock "$(dur "$file")")" "${file#$show/}"; done
+   fi
+   for file in "${playalls[@]}"; do echo "  PLAY-ALL -> quarantine: ${file#$show/}"; done
+   echo
+   if (("${#review[@]}")); then
+     echo "Unresolved files found. They will be left in place for manual review."
+     echo "The rest of this season can still be processed safely."
+   fi
+   ans=$(choice "[A] Apply safe items  [S] Skip  [Q] Quit: " "asq")
+   case "$ans" in q) return 2;; a)
+     mkdir -p "$DESTINATION/$showname/Season $(printf '%02d' "$sn")"
+     e=1
+     for file in "${eps[@]}"; do
+       target="$DESTINATION/$showname/Season $(printf '%02d' "$sn")/$showname S$(printf '%02d' "$sn")E$(printf '%02d' "$e").${file##*.}"
+       if [ -e "$target" ]; then echo "COLLISION - skipped: $target"; log "COLLISION $target"; else mv -n -- "$file" "$target" && log "MOVE $file -> $target"; fi
+       ((e+=1))
+     done
+     for file in "${playalls[@]}"; do
+       target="$QUARANTINE/$showname/Season $(printf '%02d' "$sn")/PLAY-ALL - $(basename "$file")"; mkdir -p "$(dirname "$target")"; mv -n -- "$file" "$target" && log "QUARANTINE $file -> $target"
+     done
+     # Purge generated Jellyfin trickplay data from the processed source tree.
+     find "$show" -depth -type f -iname '*.trickplay' -delete 2>/dev/null || true
+     find "$show" -depth -type d -iname '*.trickplay' -exec rm -rf -- {} + 2>/dev/null || true
+
+     # Then remove every directory that is now completely empty, bottom-up.
+     # Repeat so Disc -> Season -> Show can all disappear in the same cleanup.
+     while find "$show" -depth -mindepth 0 -type d -empty -print -exec rmdir -- {} \; 2>/dev/null | grep -q .; do :; done
+
+     echo "Applied Season $(printf '%02d' "$sn")."
+     echo ".trickplay data and empty source folders removed."
+     if [ -d "$show" ]; then
+       local leftovers
+       leftovers=$(find "$show" -type f -print 2>/dev/null | head -20)
+       if [ -n "$leftovers" ]; then
+         echo
+         echo "Manual review needed; these leftovers were NOT deleted:"
+         printf '%s\n' "$leftovers"
+         log "MANUAL_REVIEW $show"
+       else
+         rmdir -- "$show" 2>/dev/null || true
+       fi
+     fi
+     refresh_jellyfin || true;;
+   esac
+ done
+}
+
+guided(){
+ ensure_ffprobe || { echo "Cannot continue without ffprobe."; pause; return; }
+ local s
+ for s in "$SOURCE"/*/; do
+   [ -d "$s" ] || continue
+   # Ignore leftover show folders that contain no actual video files.
+   if ! find "$s" -type f -regextype posix-extended -iregex "$VIDEO_RE" -print -quit 2>/dev/null | grep -q .; then
+     continue
+   fi
+   guided_show "${s%/}" || break
+ done
+ pause
+}
+
+clean_source(){
+ [ -d "$SOURCE" ] || { echo "Source not found: $SOURCE"; pause; return; }
+ local empty_count trick_count
+ empty_count=$(find "$SOURCE" -type d -empty 2>/dev/null | wc -l)
+ trick_count=$(find "$SOURCE" -depth \( -type d -o -type f \) -iname '*.trickplay' 2>/dev/null | wc -l)
+ echo
+ echo "Source cleanup"
+ echo "  Empty folders:     $empty_count"
+ echo "  .trickplay items:  $trick_count"
+ ((empty_count==0 && trick_count==0)) && { echo "Nothing to clean."; pause; return; }
+ echo
+ echo "This removes .trickplay data and completely empty source folders."
+ echo "No video files are removed."
+ read -rp "Clean the TV source now? [y/N] " a
+ [[ "${a,,}" = y ]] || { echo "Cancelled."; pause; return; }
+
+ find "$SOURCE" -depth -type f -iname '*.trickplay' -print -delete 2>/dev/null | while IFS= read -r p; do log "DELETE_TRICKPLAY $p"; done
+ find "$SOURCE" -depth -type d -iname '*.trickplay' -print -exec rm -rf -- {} + 2>/dev/null | while IFS= read -r p; do log "DELETE_TRICKPLAY $p"; done
+
+ # Repeated bottom-up passes remove empty parents exposed by the cleanup.
+ while find "$SOURCE" -depth -mindepth 1 -type d -empty -print -exec rmdir -- {} \; 2>/dev/null | grep -q .; do :; done
+
+ echo "Source cleanup complete."
+ log "SOURCE_CLEANUP empty_before=$empty_count trickplay_before=$trick_count"
+ pause
+}
+
+refresh_jellyfin(){
+ [ -n "${JELLYFIN_URL:-}" ] || return 0
+ [ -n "${JELLYFIN_API_KEY:-}" ] || return 0
+ command -v curl >/dev/null 2>&1 || { echo "Jellyfin refresh skipped: curl is not installed."; log "JELLYFIN_REFRESH skipped_no_curl"; return 1; }
+ local url="${JELLYFIN_URL%/}/Library/Refresh" code
+ code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$url" -H "X-Emby-Token: $JELLYFIN_API_KEY" --connect-timeout 5 --max-time 15) || {
+   echo "Jellyfin refresh failed: could not reach $JELLYFIN_URL"
+   log "JELLYFIN_REFRESH failed_connect $JELLYFIN_URL"
+   return 1
+ }
+ if [[ "$code" =~ ^2 ]]; then
+   echo "Jellyfin library scan triggered."
+   log "JELLYFIN_REFRESH success code=$code"
+   return 0
+ fi
+ echo "Jellyfin refresh failed (HTTP $code)."
+ log "JELLYFIN_REFRESH failed code=$code"
+ return 1
+}
+
+settings(){
+ echo "Config: $CONFIG"; echo "SOURCE=$SOURCE"; echo "DESTINATION=$DESTINATION"; echo "QUARANTINE=$QUARANTINE"; echo "PLAYALL_TOLERANCE_SECONDS=$PLAYALL_TOLERANCE_SECONDS"; echo "JELLYFIN_URL=${JELLYFIN_URL:-<not configured>}"; if [ -n "${JELLYFIN_API_KEY:-}" ]; then echo "JELLYFIN_API_KEY=<configured>"; else echo "JELLYFIN_API_KEY=<not configured>"; fi; echo; echo "Edit with: nano \"$CONFIG\""; pause
+}
+tools_menu(){
+ while true; do
+   clear
+   cat <<EOF
+TV Cleaner tools
+
+[S] Settings
+[L] Operation log
+[R] Latest scan report
+[C] Source cleanup
+[B] Back
+EOF
+   local c
+   c=$(choice "Choose: " "slrcb")
+   case "$c" in
+     s) settings;;
+     l) less "$LOG" 2>/dev/null || pause;;
+     r) less "$LATEST_REPORT" 2>/dev/null || { echo "No scan report yet."; pause; };;
+     c) clean_source;;
+     b) return;;
+   esac
+ done
+}
+
+menu(){
+ while true; do
+ clear
+ cat <<EOF
+╔══════════════════════════════════════════════════╗
+║                 TV CLEANER                       ║
+║               Jellyfin Mode v$VERSION              ║
+╚══════════════════════════════════════════════════╝
+Source:      $SOURCE
+Destination: $DESTINATION
+
+[A] Start cleaning
+[V] View source scan
+[T] Tools / settings
+[Q] Quit
+
+Normal use: press A and follow the wizard.
+No number keys are required.
+EOF
+ local c
+ c=$(choice "Choose: " "avtq")
+ case "$c" in
+   a) guided;;
+   v) scan_all;;
+   t) tools_menu;;
+   q) exit 0;;
+ esac
+ done
+}
+menu
+\e' ]] && { read -rsn2 -t 0.05 _ || true; continue; }
+   c="${c,,}"
+   [[ "$valid" == *"$c"* ]] && { echo "$c"; return; }
+ done
+}
 ensure_ffprobe(){
   command -v ffprobe >/dev/null 2>&1 && return 0
   echo
