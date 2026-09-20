@@ -40,9 +40,7 @@ ensure_ffprobe(){
   echo "TV Cleaner uses ffprobe to read episode durations and detect Play-All titles."
   echo
   if command -v docker >/dev/null 2>&1; then
-    echo "Docker is available. TV Cleaner can use a lightweight FFmpeg container automatically."
-    read -rp "Enable containerised ffprobe now? [Y/n] " a
-    [[ "${a,,}" = n ]] && return 1
+    echo "Docker is available; using containerised ffprobe automatically."
     FFPROBE_MODE=docker
     return 0
   fi
