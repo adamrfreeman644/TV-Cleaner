@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-VERSION="0.2.9"
+VERSION="0.3.0"
 APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
 CONFIG="$APP_DIR/config.conf"
 LOG="$APP_DIR/tv-cleaner.log"
@@ -16,6 +16,8 @@ SOURCE="$DEFAULT_SOURCE"
 DESTINATION="$DEFAULT_DEST"
 QUARANTINE="$DEFAULT_QUAR"
 PLAYALL_TOLERANCE_SECONDS=20
+JELLYFIN_URL=""
+JELLYFIN_API_KEY=""
 EOF
 # shellcheck disable=SC1090
 source "$CONFIG"
@@ -216,7 +218,8 @@ guided_show(){
      while find "$show" -depth -mindepth 0 -type d -empty -print -exec rmdir -- {} \; 2>/dev/null | grep -q .; do :; done
 
      echo "Applied Season $(printf '%02d' "$sn")."
-     echo ".trickplay data and empty source folders removed.";;
+     echo ".trickplay data and empty source folders removed."
+     refresh_jellyfin || true;;
    esac
  done
 }
@@ -262,8 +265,28 @@ clean_source(){
  pause
 }
 
+refresh_jellyfin(){
+ [ -n "${JELLYFIN_URL:-}" ] || return 0
+ [ -n "${JELLYFIN_API_KEY:-}" ] || return 0
+ command -v curl >/dev/null 2>&1 || { echo "Jellyfin refresh skipped: curl is not installed."; log "JELLYFIN_REFRESH skipped_no_curl"; return 1; }
+ local url="${JELLYFIN_URL%/}/Library/Refresh" code
+ code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$url" -H "X-Emby-Token: $JELLYFIN_API_KEY" --connect-timeout 5 --max-time 15) || {
+   echo "Jellyfin refresh failed: could not reach $JELLYFIN_URL"
+   log "JELLYFIN_REFRESH failed_connect $JELLYFIN_URL"
+   return 1
+ }
+ if [[ "$code" =~ ^2 ]]; then
+   echo "Jellyfin library scan triggered."
+   log "JELLYFIN_REFRESH success code=$code"
+   return 0
+ fi
+ echo "Jellyfin refresh failed (HTTP $code)."
+ log "JELLYFIN_REFRESH failed code=$code"
+ return 1
+}
+
 settings(){
- echo "Config: $CONFIG"; echo "SOURCE=$SOURCE"; echo "DESTINATION=$DESTINATION"; echo "QUARANTINE=$QUARANTINE"; echo "PLAYALL_TOLERANCE_SECONDS=$PLAYALL_TOLERANCE_SECONDS"; echo; echo "Edit with: nano \"$CONFIG\""; pause
+ echo "Config: $CONFIG"; echo "SOURCE=$SOURCE"; echo "DESTINATION=$DESTINATION"; echo "QUARANTINE=$QUARANTINE"; echo "PLAYALL_TOLERANCE_SECONDS=$PLAYALL_TOLERANCE_SECONDS"; echo "JELLYFIN_URL=${JELLYFIN_URL:-<not configured>}"; if [ -n "${JELLYFIN_API_KEY:-}" ]; then echo "JELLYFIN_API_KEY=<configured>"; else echo "JELLYFIN_API_KEY=<not configured>"; fi; echo; echo "Edit with: nano \"$CONFIG\""; pause
 }
 menu(){
  while true; do
