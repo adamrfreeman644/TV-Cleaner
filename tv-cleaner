@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-VERSION="0.2.3"
+VERSION="0.2.4"
 APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
 CONFIG="$APP_DIR/config.conf"
 LOG="$APP_DIR/tv-cleaner.log"
@@ -203,7 +203,12 @@ guided_show(){
      for file in "${playalls[@]}"; do
        target="$QUARANTINE/$showname/Season $(printf '%02d' "$sn")/PLAY-ALL - $(basename "$file")"; mkdir -p "$(dirname "$target")"; mv -n -- "$file" "$target" && log "QUARANTINE $file -> $target"
      done
-     echo "Applied Season $(printf '%02d' "$sn").";;
+     # Remove source directories only when they are genuinely empty.
+     # rmdir never removes a directory that still contains a file/subfolder.
+     find "$seasonpath" -depth -type d -empty -exec rmdir -- {} \; 2>/dev/null || true
+     find "$show" -depth -type d -empty -exec rmdir -- {} \; 2>/dev/null || true
+     echo "Applied Season $(printf '%02d' "$sn")."
+     echo "Empty source folders cleaned up.";;
    esac
  done
 }
