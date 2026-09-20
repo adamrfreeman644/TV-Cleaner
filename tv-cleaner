@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-VERSION="0.1.2"
+VERSION="0.1.3"
 APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
 CONFIG="$APP_DIR/config.conf"
 LOG="$APP_DIR/tv-cleaner.log"
@@ -36,11 +36,22 @@ ensure_ffprobe(){
   return 1
 }
 probe(){
-  if command -v ffprobe >/dev/null 2>&1; then ffprobe "$@"; return; fi
+  if command -v ffprobe >/dev/null 2>&1; then
+    ffprobe "$@"
+    return
+  fi
+
+  # linuxserver/ffmpeg uses ffmpeg as its image entrypoint. Override it so
+  # the requested command is actually ffprobe rather than "ffmpeg ffprobe".
   local last="${!#}" hostdir base
-  hostdir=$(dirname "$last"); base=$(basename "$last")
+  hostdir=$(dirname "$last")
+  base=$(basename "$last")
   local -a args=("${@:1:$#-1}")
-  docker run --rm -v "$hostdir:/media:ro" linuxserver/ffmpeg:latest ffprobe "${args[@]}" "/media/$base"
+
+  docker run --rm --entrypoint ffprobe \
+    -v "$hostdir:/media:ro" \
+    linuxserver/ffmpeg:latest \
+    "${args[@]}" "/media/$base"
 }
 dur(){ probe -v error -show_entries format=duration -of default=nw=1:nk=1 "$1" 2>/dev/null | awk '{printf "%.0f",$1}'; }
 clock(){ local s=${1:-0}; printf '%02d:%02d:%02d' $((s/3600)) $(((s%3600)/60)) $((s%60)); }
