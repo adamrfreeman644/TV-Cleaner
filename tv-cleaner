@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-VERSION="0.2.8"
+VERSION="0.2.9"
 APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
 CONFIG="$APP_DIR/config.conf"
 LOG="$APP_DIR/tv-cleaner.log"
@@ -207,12 +207,16 @@ guided_show(){
      for file in "${playalls[@]}"; do
        target="$QUARANTINE/$showname/Season $(printf '%02d' "$sn")/PLAY-ALL - $(basename "$file")"; mkdir -p "$(dirname "$target")"; mv -n -- "$file" "$target" && log "QUARANTINE $file -> $target"
      done
-     # Remove source directories only when they are genuinely empty.
-     # rmdir never removes a directory that still contains a file/subfolder.
-     find "$seasonpath" -depth -type d -empty -exec rmdir -- {} \; 2>/dev/null || true
-     find "$show" -depth -type d -empty -exec rmdir -- {} \; 2>/dev/null || true
+     # Purge generated Jellyfin trickplay data from the processed source tree.
+     find "$show" -depth -type f -iname '*.trickplay' -delete 2>/dev/null || true
+     find "$show" -depth -type d -iname '*.trickplay' -exec rm -rf -- {} + 2>/dev/null || true
+
+     # Then remove every directory that is now completely empty, bottom-up.
+     # Repeat so Disc -> Season -> Show can all disappear in the same cleanup.
+     while find "$show" -depth -mindepth 0 -type d -empty -print -exec rmdir -- {} \; 2>/dev/null | grep -q .; do :; done
+
      echo "Applied Season $(printf '%02d' "$sn")."
-     echo "Empty source folders cleaned up.";;
+     echo ".trickplay data and empty source folders removed.";;
    esac
  done
 }
