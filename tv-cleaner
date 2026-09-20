@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-VERSION="0.2.4"
+VERSION="0.2.5"
 APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
 CONFIG="$APP_DIR/config.conf"
 LOG="$APP_DIR/tv-cleaner.log"
@@ -220,6 +220,27 @@ guided(){
  pause
 }
 
+clean_empty_folders(){
+ [ -d "$SOURCE" ] || { echo "Source not found: $SOURCE"; pause; return; }
+ local before after removed
+ before=$(find "$SOURCE" -type d -empty 2>/dev/null | wc -l)
+ echo
+ echo "Empty folders currently found: $before"
+ ((before==0)) && { echo "Nothing to clean."; pause; return; }
+ echo "Only completely empty directories will be removed."
+ read -rp "Remove them now? [y/N] " a
+ [[ "${a,,}" = y ]] || { echo "Cancelled."; pause; return; }
+ # Repeated bottom-up passes also remove parents that become empty.
+ while find "$SOURCE" -depth -mindepth 1 -type d -empty -print -exec rmdir -- {} \; 2>/dev/null | grep -q .; do :; done
+ after=$(find "$SOURCE" -type d -empty 2>/dev/null | wc -l)
+ removed=$((before-after))
+ echo "Empty-folder cleanup complete."
+ echo "Initial empty folders: $before"
+ echo "Remaining empty folders: $after"
+ log "EMPTY_FOLDER_CLEANUP initial=$before remaining=$after"
+ pause
+}
+
 settings(){
  echo "Config: $CONFIG"; echo "SOURCE=$SOURCE"; echo "DESTINATION=$DESTINATION"; echo "QUARANTINE=$QUARANTINE"; echo "PLAYALL_TOLERANCE_SECONDS=$PLAYALL_TOLERANCE_SECONDS"; echo; echo "Edit with: nano \"$CONFIG\""; pause
 }
@@ -239,10 +260,11 @@ Destination: $DESTINATION
 [3] Settings
 [4] View operation log
 [5] View latest scan report
+[6] Clean empty source folders
 [Q] Quit
 EOF
  read -rp "Select: " c
- case "${c,,}" in 1) guided;;2) scan_all;;3) settings;;4) less "$LOG" 2>/dev/null || pause;;5) less "$LATEST_REPORT" 2>/dev/null || { echo "No scan report yet."; pause; };;q) exit 0;;esac
+ case "${c,,}" in 1) guided;;2) scan_all;;3) settings;;4) less "$LOG" 2>/dev/null || pause;;5) less "$LATEST_REPORT" 2>/dev/null || { echo "No scan report yet."; pause; };;6) clean_empty_folders;;q) exit 0;;esac
  done
 }
 menu
