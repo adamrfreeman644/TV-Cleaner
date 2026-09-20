@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-VERSION="0.2.7"
+VERSION="0.2.8"
 APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
 CONFIG="$APP_DIR/config.conf"
 LOG="$APP_DIR/tv-cleaner.log"
@@ -118,7 +118,11 @@ scan_all(){
  {
    echo "TV Cleaner v$VERSION scan - $(date)"
    echo "Source: $SOURCE"
-   for s in "$SOURCE"/*/; do [ -d "$s" ] && scan_show "${s%/}"; done
+   for s in "$SOURCE"/*/; do
+     [ -d "$s" ] || continue
+     find "$s" -type f -regextype posix-extended -iregex "$VIDEO_RE" -print -quit 2>/dev/null | grep -q . || continue
+     scan_show "${s%/}"
+   done
  } | tee "$LATEST_REPORT"
  echo
  echo "Saved report: $LATEST_REPORT"
@@ -216,7 +220,14 @@ guided_show(){
 guided(){
  ensure_ffprobe || { echo "Cannot continue without ffprobe."; pause; return; }
  local s
- for s in "$SOURCE"/*/; do [ -d "$s" ] || continue; guided_show "${s%/}" || break; done
+ for s in "$SOURCE"/*/; do
+   [ -d "$s" ] || continue
+   # Ignore leftover show folders that contain no actual video files.
+   if ! find "$s" -type f -regextype posix-extended -iregex "$VIDEO_RE" -print -quit 2>/dev/null | grep -q .; then
+     continue
+   fi
+   guided_show "${s%/}" || break
+ done
  pause
 }
 
