@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-VERSION="0.2.0"
+VERSION="0.2.1"
 APP_DIR="${TV_CLEANER_HOME:-/mnt/user/appdata/tv-cleaner}"
 CONFIG="$APP_DIR/config.conf"
 LOG="$APP_DIR/tv-cleaner.log"
@@ -201,17 +201,6 @@ guided(){
 settings(){
  echo "Config: $CONFIG"; echo "SOURCE=$SOURCE"; echo "DESTINATION=$DESTINATION"; echo "QUARANTINE=$QUARANTINE"; echo "PLAYALL_TOLERANCE_SECONDS=$PLAYALL_TOLERANCE_SECONDS"; echo; echo "Edit with: nano \"$CONFIG\""; pause
 }
-update_app(){
- if [ ! -d "$APP_DIR/.git" ]; then echo "This install is not a Git clone. Re-run install.sh from the repository."; pause; return; fi
- echo "Current version: $VERSION"; git -C "$APP_DIR" fetch --tags origin || { pause; return; }
- local latest; latest=$(git -C "$APP_DIR" tag --sort=-v:refname | head -1)
- [ -z "$latest" ] && { echo "No release tags found."; pause; return; }
- echo "Latest release: $latest"; [ "v$VERSION" = "$latest" ] && { echo "Already current."; pause; return; }
- read -rp "Update to $latest? [y/N] " a
- [[ "${a,,}" = y ]] || return
- git -C "$APP_DIR" checkout -f "$latest" && "$APP_DIR/install.sh" --launcher-only
- pause
-}
 menu(){
  while true; do
  clear
@@ -228,11 +217,10 @@ Destination: $DESTINATION
 [3] Settings
 [4] View operation log
 [5] View latest scan report
-[6] Update TV Cleaner
 [Q] Quit
 EOF
  read -rp "Select: " c
- case "${c,,}" in 1) guided;;2) scan_all;;3) settings;;4) less "$LOG" 2>/dev/null || pause;;5) less "$LATEST_REPORT" 2>/dev/null || { echo "No scan report yet."; pause; };;6) update_app;;q) exit 0;;esac
+ case "${c,,}" in 1) guided;;2) scan_all;;3) settings;;4) less "$LOG" 2>/dev/null || pause;;5) less "$LATEST_REPORT" 2>/dev/null || { echo "No scan report yet."; pause; };;q) exit 0;;esac
  done
 }
 menu
